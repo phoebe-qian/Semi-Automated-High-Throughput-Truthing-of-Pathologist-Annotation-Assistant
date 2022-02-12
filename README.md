@@ -14,7 +14,7 @@ Methods and steps in my project include altering a Simple Image Object Counting 
 
 The studies and test runs support how after each algorithm learning iteration, my system computes a number closer to the ground truth number of sTILs within the region of interest. Data also concludes how my system can be efficient for Pathologists to use when annotating sTILs because the system’s prediction accuracy increases after each validation correction from the GTD.illumination and occlusions
 
-####Inconsistencies and room for error:
+#### Inconsistencies and room for error:
 Inconsistency in the visual representation of sTILs in the cel (ROI) image can cause the annotation system to count cells that look similar to sTILs that are actually not sTILs. The ground truth data used to assess and validate the annotation system contains the estimated center XY coordinates of some of the sTILs in an ROI. This can cause uncertainties because the ground truth data is calculated by the means of the XY coordinates of the outline of the sTILs  and are not the actual center. Therefore the center of image of an sTIL for the system to learn can shift and is not completely accurate. Lastly, the ground truth data to test whether the system counted the right number of sTILs can cause uncertainties. The ground truth data does not contain count all of the sTILs in the ROI, only some. This can cause the system to count less and produce a number that is rounded down than the actual number. 
 
 
