@@ -1,33 +1,30 @@
-# Single-Image-Object-Counting-and-Localizing-using-Active-Learning
+# Semi-Automated-High-Throughput-Truthing-of-Pathologist-Annotation-Assistant
 
-This is the implementation code of the paper: **[Single-Image-Object-Counting-and-Localizing-using-Active-Learning](https://www.cs.huji.ac.il/w~inbarhub/projects/count_WACV/paper.pdf)** presented in WACV 2022.
-
-The dataset used in this paper is available at [Single Image Counting Dataset](https://github.com/inbarhub/single_image_dataset).
+This is the implementation code of the paper: **[Single-Image-Object-Counting-and-Localizing-using-Active-Learning](https://www.cs.huji.ac.il/w~inbarhub/projects/count_WACV/paper.pdf)*
 
 Requirements:
 tensorflow 1.14.0
 
 ### Abstract
-The need to count and localize repeating objects in an image arises in different scenarios, such as biological microscopy studies, production-lines inspection, and surveillance recordings analysis. The use of supervised Convolutional Neural Networks (CNNs) achieves accurate object detection when trained over large class-specific datasets. The labeling effort in this approach does not pay-off when the counting is required over few images of a unique object class.
+Artificial intelligence algorithms that process whole slide images (WSIs) and determine the percentage of sTILs in a tumor cell will automatically will reduce a pathologist's burden of searching and evaluating cells and features on tumor slides. A validation dataset established by pathologist annotations is a necessary step to create this algorithm.
 
-We present a new method for counting and localizing repeating objects in single-image scenarios, assuming no pretrained classifier is available. Our method trains a CNN ver a small set of labels carefully collected from the input mage in few active-learning iterations. At each iteration, he latent space of the network is analyzed to extract a minimal number of user-queries that strives to both sample the n-class manifold as thoroughly as possible as well as avoid edundant labels.
+The goal of this project is to determine if a weakly trained Convolutional Neural Network (CNN) annotation system could act as an annotation assistant to increase data collection accuracy and efficiency by semi-determining the number of sTILs in tumor cells. 
 
-Compared with existing user-assisted counting methods, our active-learning iterations achieve state-of-the-art performance in terms of counting and localizing accuracy, number of user mouse clicks, and running-time. This evaluation was performed through a large user study over a wide range of image classes with diverse conditions of illumination and occlusions
+Methods and steps in my project include altering a Simple Image Object Counting and Localizing using an Active Learning algorithm to count the number of sTILs within a tumor cell region. This pre-made algorithm takes in human feedback to re-learn and generate a count number closer to the actual count number. The “human providing the feedback” action will be done by pathologists during the annotation process in the real world. To avoid human interference in my project, I replaced this human-to-computer feedback with ground-truth-data-to-computer feedback. My system will make corrections to its predictions according to the ground truth data (GTD).
+
+The studies and test runs support how after each algorithm learning iteration, my system computes a number closer to the ground truth number of sTILs within the region of interest. Data also concludes how my system can be efficient for Pathologists to use when annotating sTILs because the system’s prediction accuracy increases after each validation correction from the GTD.illumination and occlusions
+
+####Inconsistencies and room for error:
+Inconsistency in the visual representation of sTILs in the cel (ROI) image can cause the annotation system to count cells that look similar to sTILs that are actually not sTILs. The ground truth data used to assess and validate the annotation system contains the estimated center XY coordinates of some of the sTILs in an ROI. This can cause uncertainties because the ground truth data is calculated by the means of the XY coordinates of the outline of the sTILs  and are not the actual center. Therefore the center of image of an sTIL for the system to learn can shift and is not completely accurate. Lastly, the ground truth data to test whether the system counted the right number of sTILs can cause uncertainties. The ground truth data does not contain count all of the sTILs in the ROI, only some. This can cause the system to count less and produce a number that is rounded down than the actual number. 
+
 
 ### Running the code
 
 To run the code, use 'count_repetitive_objects.py' script with two arguments: an image name and the participant name.
 For example:
-* python3 count_repetitive_objects.py CellSml Inbar
-* python3 count_repetitive_objects.py Logs Jonathan
-* python3 count_repetitive_objects.py Water Michael
+* python3 count_repetitive_objects.py Cell1 Phoebe
+* python3 count_repetitive_objects.py Cell34 Jonathan
+* python3 count_repetitive_objects.py Cell16 Michael
 
-The names of the images (e.g., CellSml, Logs...) can be found in the dataset or in Table 1 in the paper.
+The names of the images (e.g., Cell1, Cell16...) can be found in the nucls_data folder
 
-At every iteration, positive and negative potential locations will be shown for user feedback. The user needs to click on the *misclassified* ones and close the window. The color of the windows that are clicked by the user will be changed to black.
-
-This prodeucde is repeated 5 times. At the end, the final repeaintg locations will be presented to the user. The localization errors and the counting will be shown on the console/termial as well as will be saved in a dedicated folder.
-
-To simplify, we removed the option of marking the initial repeating object. You can see the windows locations in conf.py script.
-
-More information can be found in the paper. If you have any questions, you can find me in: inbarhub@gmail.com
