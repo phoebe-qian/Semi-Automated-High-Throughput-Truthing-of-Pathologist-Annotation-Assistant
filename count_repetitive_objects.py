@@ -48,6 +48,7 @@ Accuracy = []
 Time_Duration =[]
 Ground_Truth_Count = []
 dens_sTILS = []
+precision = []
 
 clicks_counter = 0
 
@@ -66,16 +67,20 @@ filt_mag = 0.1
 bias_mag = 0.0
 
 
-
+"""
 def find_acc(gt_count, our_count):
     errorRate = (abs(gt_count-our_count)/gt_count)*100
     acc = 100 - errorRate
     return acc
 """
+def find_prec (false_pos, true_pos):
+    prec = (true_pos/(true_pos+false_pos))*100
+    return prec
+
 def find_acc(gt_count, true_pos):
     recall = (true_pos/gt_count)*100
     return recall
-"""
+
 def find_density(our_count):
     sTILS_area = curr_patch_sz**2
     all_sTILS_area = our_count*sTILS_area
@@ -83,19 +88,19 @@ def find_density(our_count):
     return density_s
 
 
-def get_patches(G, I, G_th,all_boxes,len_x,len_y,max_num_cells):
+def get_patches(G, I, G_th,all_boxes,im_h,im_w,max_num_cells,iou_threshold=0.2):
     """
     Getting the potential locations of the repeating object based on the network outpout G
     """
     p = []
     scores = tf.reshape(G,[-1])
     all_scores = tf.stack(scores, 0)
-    selected_indices = tf.image.non_max_suppression(all_boxes, scores, max_num_cells, iou_threshold=0.2)
+    selected_indices = tf.image.non_max_suppression(all_boxes, scores, max_num_cells, iou_threshold=iou_threshold)
     selected_boxes = tf.gather(all_boxes, selected_indices)
     selected_scores = tf.gather(scores, selected_indices)
-    I = tf.slice(I, [0, patch_sz_hf, patch_sz_hf, 0], [1, len_x , len_y , 1])
+    I = tf.slice(I, [0, patch_sz_hf, patch_sz_hf, 0], [1, im_h , im_w , 1])
 
-    pos_ind = tf.where(selected_scores > 0)
+    pos_ind = tf.where(selected_scores > G_th)
 
     return [selected_indices,pos_ind,all_scores,selected_scores]
 
@@ -116,13 +121,13 @@ def unpool(I,loc,shape):
 
     return tf.stack(U,axis=0)
 
-def network(x, enc_w1, enc_b1, enc_w2, enc_b2, enc_w3, enc_b3, enc_w4, enc_b4, len_x,len_y,nf1,nf2):
+def network(x, enc_w1, enc_b1, enc_w2, enc_b2, enc_w3, enc_b3, enc_w4, enc_b4, im_h,im_w,nf1,nf2):
     """
     Forward pass. The network architecture is explained in the paper.
     """
     #layer 1 (encoding layer)
     k = 1
-    x = tf.slice(x, [0, patch_sz_hf, patch_sz_hf, 0], [1, len_x , len_y , 3])
+    x = tf.slice(x, [0, patch_sz_hf, patch_sz_hf, 0], [1, im_h , im_w , 3])
     x = tf.nn.conv2d(x, enc_w1,strides=[1, k, k, 1], padding='SAME')
     x = tf.nn.bias_add(x, enc_b1)
     x = tf.nn.relu(x)
@@ -141,14 +146,14 @@ def network(x, enc_w1, enc_b1, enc_w2, enc_b2, enc_w3, enc_b3, enc_w4, enc_b4, l
     features = tf.reshape(x_smaller,[-1,nf2])
     features = tf.transpose(tf.transpose(features)/tf.sqrt(tf.reduce_sum(tf.square(features),axis=1)))
     features = tf.where(tf.is_nan(features),tf.zeros(tf.shape(features)),features)
-    features = tf.reshape(features,(1,tf.cast(len_x/2,tf.int32),tf.cast(len_y/2,tf.int32),nf2))
+    features = tf.reshape(features,(1,tf.cast(im_h/2,tf.int32),tf.cast(im_w/2,tf.int32),nf2))
     x = tf.nn.relu(features)
     
     #layer 3 (decoding layer)
     #2by2 unpooling step that produce the network's output classification map, C9x) to have the same resolution
     #as the input image
-    x = unpool(x,loc1,[1,len_x,len_y,nf2])
-    x = tf.nn.conv2d_transpose(x, enc_w3, [1,len_x,len_y,nf1], [1, 1, 1, 1], 'SAME')
+    x = unpool(x,loc1,[1,im_h,im_w,nf2])
+    x = tf.nn.conv2d_transpose(x, enc_w3, [1,im_h,im_w,nf1], [1, 1, 1, 1], 'SAME')
     x = tf.nn.bias_add(x, enc_b3)
     x = tf.nn.relu(x)
 
@@ -158,7 +163,7 @@ def network(x, enc_w1, enc_b1, enc_w2, enc_b2, enc_w3, enc_b3, enc_w4, enc_b4, l
 
     return [x,tf.reshape(features,[-1,nf2])]
 
-def cost_G_obj(all_scores,features,rej_final, acc_final,rej_final_smaller,acc_final_smaller,len_x,len_y):
+def cost_G_obj(all_scores,features,rej_final, acc_final,rej_final_smaller,acc_final_smaller,im_h,im_w):
     """
     Calculate the loss (L_label+L_sub)
     """
@@ -374,7 +379,7 @@ def continue_training(rej_final, acc_final, all_scores, display=False, neg_thld=
 
     return True
 
-def calc_cost_AE_prep(x_corr,th,all_boxes,len_x,len_y):
+def calc_cost_AE_prep(x_corr,th,all_boxes,im_h,im_w,iou_threshold=0.2):
     """
     Calculate the initilize positive and negative buckets using normalized cross correlation.
     """
@@ -382,11 +387,11 @@ def calc_cost_AE_prep(x_corr,th,all_boxes,len_x,len_y):
     scores_x_corr = tf.reshape(tf.slice(
                                 x_corr, 
                                 [0, patch_sz_hf, patch_sz_hf, 0], 
-                                [1, len_x, len_y, 1]),
+                                [1, im_h, im_w, 1]),
                                 [-1])
-    ind = list(range((len_x ) * (len_y )))
+    ind = list(range((im_h ) * (im_w )))
 
-    selected_indices_pos = tf.image.non_max_suppression(all_boxes, scores_x_corr,len_x*len_y, iou_threshold=0.2)
+    selected_indices_pos = tf.image.non_max_suppression(all_boxes, scores_x_corr,im_h*im_w, iou_threshold=iou_threshold)
     selected_x_scores_pos = tf.gather(scores_x_corr, selected_indices_pos)
     selected_center_ind_pos = tf.gather(all_center_ind, selected_indices_pos)
     selected_ind_pos = tf.gather(ind, selected_indices_pos)
@@ -394,98 +399,21 @@ def calc_cost_AE_prep(x_corr,th,all_boxes,len_x,len_y):
     ind_pos = tf.squeeze(tf.gather(selected_ind_pos, pos))
     to_show_pos = tf.squeeze(tf.gather(selected_center_ind_pos, pos))
 
-    selected_indices_neg = tf.image.non_max_suppression(all_boxes, np.abs(scores_x_corr), len_x*len_y, iou_threshold=0.2)
+    selected_indices_neg = tf.image.non_max_suppression(all_boxes, np.abs(scores_x_corr), im_h*im_w, iou_threshold=iou_threshold)
     selected_x_scores_neg = tf.gather(scores_x_corr, selected_indices_neg)
     selected_center_ind_neg = tf.gather(all_center_ind, selected_indices_neg)
     selected_ind_neg = tf.gather(ind, selected_indices_neg)
-    neg = tf.cast(tf.where(selected_x_scores_neg < 0), tf.int32)
+    neg = tf.cast(tf.where(selected_x_scores_neg < -th*.75), tf.int32)
     ind_neg = tf.squeeze(tf.gather(selected_ind_neg, neg))
     to_show_neg = tf.squeeze(tf.gather(selected_center_ind_neg, neg))
 
     return [to_show_pos, to_show_neg, ind_pos, ind_neg]
 
-def purple_dots_on_image(input,ind_to_ask,acc_ind_final):
-    """
-    Create the method's solution image. This method outputs the input image with the locations of the repeating objects
-    """
-    global all_center_ind
-    final_res_image = np.zeros((np.shape(input)[1],np.shape(input)[2],3))
-    gt_color_1 = [0.64,0.27,0.61]
-
-    for i in range(0,3):
-        final_res_image[:,:,i] = (input[0,:,:,0]+input[0,:,:,1]+input[0,:,:,2])/3
-    for i in range(0,len(ind_to_ask)):
-        final_res_image[all_center_ind[ind_to_ask[i]][0]-2:all_center_ind[ind_to_ask[i]][0]+2,all_center_ind[ind_to_ask[i]][1]-2:all_center_ind[ind_to_ask[i]][1]+2,0] = gt_color_1[0]
-        final_res_image[all_center_ind[ind_to_ask[i]][0]-2:all_center_ind[ind_to_ask[i]][0]+2,all_center_ind[ind_to_ask[i]][1]-2:all_center_ind[ind_to_ask[i]][1]+2,1] = gt_color_1[1]
-        final_res_image[all_center_ind[ind_to_ask[i]][0]-2:all_center_ind[ind_to_ask[i]][0]+2,all_center_ind[ind_to_ask[i]][1]-2:all_center_ind[ind_to_ask[i]][1]+2,2] = gt_color_1[2]
-    acc_final = np.where(acc_ind_final == 1)[0]
-    for i in range(0,len(acc_final)):
-        final_res_image[all_center_ind[acc_final[i]][0]-2:all_center_ind[acc_final[i]][0]+2,all_center_ind[acc_final[i]][1]-2:all_center_ind[acc_final[i]][1]+2,0] = gt_color_1[0]
-        final_res_image[all_center_ind[acc_final[i]][0]-2:all_center_ind[acc_final[i]][0]+2,all_center_ind[acc_final[i]][1]-2:all_center_ind[acc_final[i]][1]+2,1] = gt_color_1[1]
-        final_res_image[all_center_ind[acc_final[i]][0]-2:all_center_ind[acc_final[i]][0]+2,all_center_ind[acc_final[i]][1]-2:all_center_ind[acc_final[i]][1]+2,2] = gt_color_1[2]
-
-    final_res_image = final_res_image[patch_sz_hf:-patch_sz_hf,patch_sz_hf:-patch_sz_hf,:]
-    count = len(acc_final)+len(np.setdiff1d(ind_to_ask,acc_final))
-
-    return [count,final_res_image]
-
-def show_point_on_image(input,col_row,color = [0.64,0.27,0.61],convert_gray=True):
-    """
-    Create image with points in col_row marked by pt_color. This method outputs the input image with the locations of the repeating objects
-    """
-    pt_image = np.zeros((np.shape(input)[0],np.shape(input)[1],3))
-    if convert_gray:
-        for i in range(0,3):
-            pt_image[:,:,i] = (input[:,:,0]+input[:,:,1]+input[:,:,2])/3
-    else:
-        for i in range(0,3):
-            pt_image[:,:,i] = input[:,:,i]
-
-    for p in col_row:
-        r,c=p
-        pt_image[r-2:r+2,c-2:c+2] = color
-   
-    #pt_image = pt_image[patch_sz_hf:-patch_sz_hf,patch_sz_hf:-patch_sz_hf,:]
-
-    return pt_image
-
-def show_acc_rej_on_image(input_im,all_center_ind,acc_ind_final,rej_ind_final,out_image_file,convert_gray=True):
-    acc_pt = all_center_ind[np.where(acc_ind_final==1)]
-    rej_pt = all_center_ind[np.where(rej_ind_final==1)]
-    pt_image = show_point_on_image(input_im,acc_pt,color=(0,1,0),convert_gray=convert_gray)
-    pt_image = show_point_on_image(pt_image,rej_pt,color=(1,0,0),convert_gray=False)
-    print(f'=======> saving image to {dir}{out_image_file}')
-    image.imsave(dir+out_image_file, pt_image)
-
-def show_boxes_on_image(input,boxes,color = [0.64,0.27,0.61],convert_gray=True):
-    b_image = np.zeros((np.shape(input)[0],np.shape(input)[1],3))
-    if convert_gray:
-        for i in range(0,3):
-            b_image[:,:,i] = (input[:,:,0]+input[:,:,1]+input[:,:,2])/3
-    else:
-        for i in range(0,3):
-            b_image[:,:,i] = input[:,:,i]
-
-    for b in boxes:
-        b_image[b[0]:b[2], b[1]] = color
-        b_image[b[0]:b[2], b[3]] = color
-        b_image[b[0], b[1]:b[3]] = color
-        b_image[b[2], b[1]:b[3]] = color
-
-    return b_image
-
-def show_acc_rej_boxes_on_image(input_im,acc_boxes,rej_boxes,out_image_file,convert_gray=True):
-    b_image = show_boxes_on_image(input_im,acc_boxes,color=(0,1,0),convert_gray=convert_gray)
-    b_image = show_boxes_on_image(b_image,rej_boxes,color=(1,0,0),convert_gray=False)
-    print(f'=======> saving image to {dir}{out_image_file}')
-    image.imsave(dir+out_image_file, b_image)
-    return b_image
-
-def adding_rej(path,len_x,len_y,rej_ind_final):
+def adding_rej(path,im_h,im_w,rej_ind_final):
     """
     Adding negative points in borders
     """
-    tmp_rej = np.reshape(rej_ind_final,(len_x,len_y))
+    tmp_rej = np.reshape(rej_ind_final,(im_h,im_w))
     tmp_rej[0:2,:] = 1
     tmp_rej[:,0:2] = 1
     tmp_rej[-2:,:] = 1
@@ -493,15 +421,15 @@ def adding_rej(path,len_x,len_y,rej_ind_final):
     rej_ind_final = np.reshape(tmp_rej,[-1])
     return rej_ind_final
 
-def calc_smaller_ind(curr_pos_ind,len_x,len_y,factor,output_mat=False):
+def calc_smaller_ind(curr_pos_ind,im_h,im_w,factor,output_mat=False):
     """
     Mapping between the image presented to the user (which is bigger by a factor of 2) and the
     real size of the image.
     """
-    mat = np.zeros((len_x,len_y))
-    mat_smaller = np.zeros((np.int32(len_x/factor),np.int32(len_y/factor)))
+    mat = np.zeros((im_h,im_w))
+    mat_smaller = np.zeros((np.int32(im_h/factor),np.int32(im_w/factor)))
 
-    [row,col] = np.unravel_index(curr_pos_ind, [len_x, len_y])
+    [row,col] = np.unravel_index(curr_pos_ind, [im_h, im_w])
     row_small = np.int32(row/factor)
     col_small = np.int32(col/factor)
     for i in range(0,len(row_small)):
@@ -511,27 +439,27 @@ def calc_smaller_ind(curr_pos_ind,len_x,len_y,factor,output_mat=False):
     else:
         return np.where(np.reshape(mat_smaller == 1,-1))[0]
 
-def calc_larger_ind(curr_pos_ind,len_x,len_y,factor):
+def calc_larger_ind(curr_pos_ind,im_h,im_w,factor):
     """
     Mapping between the input image and the image presnted to the user (which is bigger
     by a factor of 2).
     """
-    mat = np.zeros((len_x,len_y))
-    mat_larger = np.zeros((len_x*factor,len_y*factor))
+    mat = np.zeros((im_h,im_w))
+    mat_larger = np.zeros((im_h*factor,im_w*factor))
 
-    [row,col] = np.unravel_index(curr_pos_ind, [len_x, len_y])
+    [row,col] = np.unravel_index(curr_pos_ind, [im_h, im_w])
     row_large = row*factor
     col_large = col*factor
     for i in range(0,len(row_large)):
         mat_larger[row_large[i],col_large[i]] = 1
     return np.where(np.reshape(mat_larger == 1,-1))[0]
 
-def change_to_closest_to_ask(curr_ind,ind_to_ask,len_x,len_y):
+def change_to_closest_to_ask(curr_ind,ind_to_ask,im_h,im_w):
     """
     Change curr_ind to the closest index from ind_to_ask
     """
-    [row_curr,col_curr] = np.unravel_index(curr_ind, [len_x, len_y])
-    [row_ind_to_ask,col_ind_to_ask] = np.unravel_index(ind_to_ask, [len_x, len_y])
+    [row_curr,col_curr] = np.unravel_index(curr_ind, [im_h, im_w])
+    [row_ind_to_ask,col_ind_to_ask] = np.unravel_index(ind_to_ask, [im_h, im_w])
     new_row = []
     new_col = []
     for i in range(0,len(row_curr)):
@@ -541,7 +469,7 @@ def change_to_closest_to_ask(curr_ind,ind_to_ask,len_x,len_y):
         new_row.append(row_ind_to_ask[np.argmin(d)])
         new_col.append(col_ind_to_ask[np.argmin(d)])
 
-    mat = np.zeros((len_x,len_y))
+    mat = np.zeros((im_h,im_w))
     for i in range(0,len(new_row)):
         mat[new_row[i],new_col[i]] = 1
     return np.where(np.reshape(mat,-1) == 1)[0]
@@ -584,29 +512,29 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
     fil_sz_3 = 5
     fil_sz_4 = 5
 
-    len_x = im_size[0]
-    len_y = im_size[1]
-    ROIarea = len_x*len_y
+    im_h = im_size[0]
+    im_w = im_size[1]
+    ROIarea = im_h*im_w
 
     # tf Graph input
-    x_orig_tf = tf.get_variable(shape=(1, len_x + patch_sz_hf*2, len_y + patch_sz_hf*2, 3), name='x_orig', trainable=False)
-    x_orig_ph = tf.placeholder(tf.float32, shape=[1, len_x + patch_sz_hf*2, len_y + patch_sz_hf*2, 3])
+    x_orig_tf = tf.get_variable(shape=(1, im_h + patch_sz_hf*2, im_w + patch_sz_hf*2, 3), name='x_orig', trainable=False)
+    x_orig_ph = tf.placeholder(tf.float32, shape=[1, im_h + patch_sz_hf*2, im_w + patch_sz_hf*2, 3])
     assign_x_orig = tf.assign(x_orig_tf, x_orig_ph, validate_shape=False)
 
-    x_corr = tf.placeholder(tf.float32, [None, len_x + patch_sz_hf*2, len_y + patch_sz_hf*2, 1])
+    x_corr = tf.placeholder(tf.float32, [None, im_h + patch_sz_hf*2, im_w + patch_sz_hf*2, 1])
 
-    y = np.int32(np.linspace(0, len_x - 1, len_x ))
-    x = np.int32(np.linspace(0, len_y - 1, len_y ))
+    y = np.int32(np.linspace(0, im_h - 1, im_h )) # vertical
+    x = np.int32(np.linspace(0, im_w - 1, im_w )) # horizontal 
     [i, j] = np.meshgrid(x, y)
-    all_boxes = np.zeros(((len_x ) * (len_y ), 4), np.int32)
+    all_boxes = np.zeros(((im_h ) * (im_w ), 4), np.int32)
     all_boxes[:, 0] = np.reshape(j, -1)
     all_boxes[:, 1] = np.reshape(i, -1)
     all_boxes[:, 2] = np.reshape(j, -1) + patch_sz -1
     all_boxes[:, 3] = np.reshape(i, -1) + patch_sz -1
 
-    all_center_ind = np.zeros(((len_x ) * (len_y), 2), np.int32)
-    all_center_ind[:, 0] = np.reshape(j, -1) + patch_sz_hf
-    all_center_ind[:, 1] = np.reshape(i, -1) + patch_sz_hf
+    all_center_ind = np.zeros(((im_h ) * (im_w), 2), np.int32)
+    all_center_ind[:, 0] = np.reshape(j, -1) + patch_sz_hf # rows
+    all_center_ind[:, 1] = np.reshape(i, -1) + patch_sz_hf # cols
 
     with tf.variable_scope("foo", reuse=tf.AUTO_REUSE):
         weights_generator = {
@@ -629,6 +557,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
 
     learning_rate_G = 0.001
     learning_rate_G_init = 0.001
+    patch_iou_threshold = 0.2 #representing the threshold for deciding whether boxes overlap too much with respect to IOU.
 
     print(f'preparing variabls ...')
     with tf.variable_scope("foo", reuse=tf.AUTO_REUSE):
@@ -641,7 +570,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         regularization_G_ph = tf.placeholder(tf.float32, shape=[])
         assign_regularization_G = tf.assign(regularization_G_tf, regularization_G_ph, validate_shape=False)
 
-        num = (len_x ) * (len_y )
+        num = (im_h ) * (im_w )
         rej_box_ind_final_tf = tf.get_variable(shape=(num,), name='rej_ind', trainable=False,initializer=tf.zeros_initializer())
         rej_box_ind_final_ph = tf.placeholder(tf.float32, shape=[num, ])
         assign_rej_ind_final = tf.assign(rej_box_ind_final_tf, rej_box_ind_final_ph, validate_shape=False)
@@ -650,7 +579,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         acc_box_ind_final_ph = tf.placeholder(tf.float32, shape=[num, ])
         assign_acc_ind_final = tf.assign(acc_box_ind_final_tf, acc_box_ind_final_ph, validate_shape=False)
 
-        num_smaller = (len_x/factor ) * (len_y/factor )
+        num_smaller = (im_h/factor ) * (im_w/factor )
         rej_box_ind_final_smaller_tf = tf.get_variable(shape=(num_smaller,), name='rej_ind_smaller', trainable=False,initializer=tf.zeros_initializer())
         rej_box_ind_final_smaller_ph = tf.placeholder(tf.float32, shape=[num_smaller, ])
         assign_rej_ind_smaller_final = tf.assign(rej_box_ind_final_smaller_tf, rej_box_ind_final_smaller_ph, validate_shape=False)
@@ -664,27 +593,22 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         assign_th = tf.assign(th_tf, th_ph, validate_shape=False)
 
 
-
-
     ################################### network ###################################
     print(f'preparing classifer network ...')
     [G,features] = network(x_orig_tf, weights_generator['encoder_g1'], biases_generator['encoder_b1'],
                    weights_generator['encoder_g2'], biases_generator['encoder_b2'], weights_generator['encoder_g3'],
                    biases_generator['encoder_b3'], weights_generator['encoder_g4'], biases_generator['encoder_b4'],
-                   len_x,len_y,nf1,nf2)
+                   im_h,im_w,nf1,nf2)
 
     print(f'get patches ...')
-    [ind_box,pos_ind,all_scores,selected_scores] = get_patches(G, x_orig_tf, th_tf ,all_boxes,len_x,len_y,max_num_cells)
+    [ind_box,pos_ind,all_scores,selected_scores] = get_patches(G, x_orig_tf, th_tf ,all_boxes,im_h,im_w,max_num_cells,iou_threshold=patch_iou_threshold)
 
     ################################### AE ###################################
     print(f'preparing AE ...')
-    [show_pos_AE, show_neg_AE, x_corr_pos, x_corr_rej] = calc_cost_AE_prep(x_corr,th,all_boxes,len_x,len_y)
+    [show_pos_AE, show_neg_AE, x_corr_pos, x_corr_rej] = calc_cost_AE_prep(x_corr,th,all_boxes,im_h,im_w,iou_threshold=patch_iou_threshold)
 
     print(f'cost G object ...')
-    cost_G_rejacc_maps = cost_G_obj(all_scores,features,rej_box_ind_final_tf,acc_box_ind_final_tf,rej_box_ind_final_smaller_tf,acc_box_ind_final_smaller_tf,len_x,len_y)
-
-
-
+    cost_G_rejacc_maps = cost_G_obj(all_scores,features,rej_box_ind_final_tf,acc_box_ind_final_tf,rej_box_ind_final_smaller_tf,acc_box_ind_final_smaller_tf,im_h,im_w)
 
 
     all_vars = tf.global_variables()
@@ -713,22 +637,25 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         # The size of these bonary maps are the size of the input image (vectorize)
 
         # The rejected map from the init. in order to ignore from showing in final rej map
-        rej_ind_final_from_AE = np.zeros((((len_x ) * (len_y )),))
-        acc_ind_final_from_AE = np.zeros((((len_x ) * (len_y )),))
+        rej_ind_final_from_AE = np.zeros((((im_h ) * (im_w )),))
+        acc_ind_final_from_AE = np.zeros((((im_h ) * (im_w )),))
 
-        rej_ind_final = np.zeros((((len_x ) * (len_y )),))
-        acc_ind_final = np.zeros((((len_x ) * (len_y )),))
+        rej_ind_final = np.zeros((((im_h ) * (im_w )),))
+        acc_ind_final = np.zeros((((im_h ) * (im_w )),))
         curr_ind_box = []
 
         sess.run(init)
-        batch_x_orig = read_dataset(filename, len_x,len_y, patch_sz,show_gray)
+        batch_x_orig = read_dataset(filename, im_h,im_w, patch_sz,show_gray)
 
         # there can be more than one window location
+        # start_loc represent the box upper-left corner after padding
         window_loc = []
         for i in range(3):
             ind = random.randint(0, (len(row_gt)-1))
-            locs = [row_gt[ind], col_gt[ind]]
+            locs = [col_gt[ind]-patch_sz_hf,row_gt[ind]-patch_sz_hf]
             window_loc.append(locs)
+        if "34" in image_name:
+            window_loc=[[108, 12], [266, 101], [89, 336]]
         print(f'window locs: {window_loc}')
         start_loc = window_loc
         """
@@ -741,7 +668,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         print(f'computing corss correlation btw input image with shape {dims} and the sample window ...')
         for i, (c,r) in enumerate(start_loc):
             print(f'cropping sample window size {patch_sz} at upper_left location (r,c)=({r},{c}) from input image with shape {dims} ')
-            # start_loc was center in the original image and now it becomes upper-left corner after padding
+            
             patch = batch_x_orig[0,r:r+patch_sz,c:c+patch_sz, :]
             res = np.zeros((dims[1]-patch_sz_hf*2, dims[2]-patch_sz_hf*2))
             print(f'i={i},res.shape={res.shape},patch.shape={patch.shape},batch_x_orig.shape={batch_x_orig.shape}')
@@ -753,13 +680,14 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             img_corr[patch_sz_hf:-patch_sz_hf,patch_sz_hf:-patch_sz_hf,i] = res
             image.imsave(dir+'patch_%d.png'%(i), normalize_image(patch))
             image.imsave(dir+'res_%d.png'%(i), normalize_image(res))
+            print(f'res_{i} min={np.min(res)}, max={np.max(res)}')
         image.imsave(dir+'img_input.png', normalize_image(batch_x_orig[0]))
         #image.imsave(dir+'img_corr.png', normalize_image(np.repeat(img_corr,3,axis=2)))
 
         #plt.show()
 
         for i in range(0,len(start_loc)):
-            batch_x_corr = np.zeros((1, len_x + patch_sz_hf*2, len_y + patch_sz_hf*2, 1))
+            batch_x_corr = np.zeros((1, im_h + patch_sz_hf*2, im_w + patch_sz_hf*2, 1))
             batch_x_corr[0,:,:,0] = img_corr[:,:,i]
 
             # extract initialized positive and negative buckets from the normalized-correlation image
@@ -771,26 +699,29 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             rej_ind_final_from_AE[x_corr_rej_curr] = 1
             acc_ind_final_from_AE[x_corr_pos_curr] = 1
 
-            # each being a hot vector in the size of len_x \times len_y with active entries set to 1 and inactive to 0
+            # each being a hot vector in the size of im_h \times im_w with active entries set to 1 and inactive to 0
             rej_ind_final[x_corr_rej_curr] = 1
             acc_ind_final[x_corr_pos_curr] = 1
 
             #adding rej points in borders
-            rej_ind_final = adding_rej(path,len_x,len_y,rej_ind_final)
+            rej_ind_final = adding_rej(path,im_h,im_w,rej_ind_final)
 
             sess.run(assign_rej_ind_final, {rej_box_ind_final_ph: rej_ind_final})
             sess.run(assign_acc_ind_final, {acc_box_ind_final_ph: acc_ind_final})
 
-            sess.run(assign_rej_ind_smaller_final, {rej_box_ind_final_smaller_ph: calc_smaller_ind(np.where(rej_ind_final==1)[0],len_x,len_y,factor,True)})
-            sess.run(assign_acc_ind_smaller_final, {acc_box_ind_final_smaller_ph: calc_smaller_ind(np.where(acc_ind_final==1)[0],len_x,len_y,factor,True)})
+            sess.run(assign_rej_ind_smaller_final, {rej_box_ind_final_smaller_ph: calc_smaller_ind(np.where(rej_ind_final==1)[0],im_h,im_w,factor,True)})
+            sess.run(assign_acc_ind_smaller_final, {acc_box_ind_final_smaller_ph: calc_smaller_ind(np.where(acc_ind_final==1)[0],im_h,im_w,factor,True)})
 
         print("---------------create markup image to show initial acc (green) and rej (red) ---------------")
-        show_acc_rej_on_image(batch_x_orig[0],all_center_ind,acc_ind_final,rej_ind_final,'init_gt_image.png')
+        show_acc_rej_on_image(batch_x_orig[0],all_center_ind,acc_ind_final,rej_ind_final,dir+'init_gt_image.png')
+
 
         sess.run(assign_x_orig, {x_orig_ph: batch_x_orig})
 
         regularization_G = 0
         sess.run(assign_regularization_G, {regularization_G_ph: regularization_G})
+        G_th = 0.5
+        sess.run(assign_th, {th_ph: G_th})
         # Initialize step: train the network with the initialize labels
         print(f'Initialize step: train the network with the initialize labels ...')
         i = 0
@@ -808,10 +739,17 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
         print(f'Initialize step done')
 
         print(f'model inference using the initial weights ...')
-        step = 0
         input = sess.run(x_orig_tf)
-        G_th = 0
 
+        regularization_G = 0.001
+        sess.run(assign_regularization_G, {regularization_G_ph: regularization_G})
+        G_th = 0.5
+        sess.run(assign_th, {th_ph: G_th})
+
+        print(f'going through the iterations ...')
+        training_iters=100
+        reviewed_ind=[]
+        step = 0
         if step==0:
             print("---------------create gt image to show row_gt, col_gt ---------------")
             print(f'row_gt shape: {row_gt.shape}, col_gt shape: {col_gt.shape}')
@@ -819,28 +757,21 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             print(f'=======> saving image to {dir}gt_markup_image'+'.png')
             image.imsave(dir+'gt_markup_image.png', normalize_image(gt_markup_image))
 
-        regularization_G = 0.001
-        sess.run(assign_regularization_G, {regularization_G_ph: regularization_G})
-        sess.run(assign_th, {th_ph: G_th})
-
-        print(f'going through the iterations ...')
-        training_iters=31
-        reviewed_ind=[]
         while step * batch_size <= training_iters: 
             curr_features = sess.run(features)#features from CNN
 
             [curr_pos_ind,curr_ind_box,curr_all_scores] = sess.run([pos_ind, ind_box,all_scores])
             curr_center_ind = all_center_ind[curr_ind_box]
             curr_ind_box = curr_ind_box[0:curr_pos_ind.shape[0]]
-            curr_ind_box_small = calc_smaller_ind(curr_pos_ind,len_x,len_y,factor)
+            curr_ind_box_small = calc_smaller_ind(curr_pos_ind,im_h,im_w,factor)
 
-            potential_map = np.zeros((len_x ) * (len_y ))
+            potential_map = np.zeros((im_h ) * (im_w ))
             potential_map[curr_ind_box[0:curr_pos_ind.shape[0]]] = 1
             potential_map_tmp = np.where(potential_map == 1)[0]
-            potential_map = np.reshape(potential_map, (len_x , len_y ))
+            potential_map = np.reshape(potential_map, (im_h , im_w ))
             ind_G = np.squeeze(np.where(potential_map == 1))
 
-            acc_ind_final_new = np.reshape(acc_ind_final, (len_x , len_y ))
+            acc_ind_final_new = np.reshape(acc_ind_final, (im_h , im_w ))
             ind_final = np.squeeze(np.where(acc_ind_final_new == 1))
             if ind_final.ndim == 1:
                 ind_final = np.expand_dims(ind_final,1)
@@ -868,8 +799,8 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             
             acc_ind_final = np.reshape(acc_ind_final_new, [-1])
 
-            curr_features_acc = curr_features[calc_smaller_ind(np.where(acc_ind_final == 1),len_x,len_y,factor)]
-            curr_features_rej = curr_features[calc_smaller_ind(np.where(rej_ind_final == 1),len_x,len_y,factor)]
+            curr_features_acc = curr_features[calc_smaller_ind(np.where(acc_ind_final == 1),im_h,im_w,factor)]
+            curr_features_rej = curr_features[calc_smaller_ind(np.where(rej_ind_final == 1),im_h,im_w,factor)]
             # Concatenate the features that are related to positive and negative labeled windows
             tot_features = np.concatenate((curr_features_acc,curr_features_rej))
             tot_features_bool = np.concatenate((np.ones((curr_features_acc.shape[0])),-np.ones((curr_features_rej.shape[0]))))
@@ -886,7 +817,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             #ind_to_ask = np.setdiff1d(ind_to_ask, np.where((rej_ind_final + acc_ind_final) >= 1))
             ind_to_ask = np.setdiff1d(ind_to_ask, np.where((acc_ind_final) >= 1))
             ind_to_ask = np.setdiff1d(ind_to_ask, np.array(reviewed_ind))
-            ind_to_ask_small = calc_smaller_ind(ind_to_ask,len_x,len_y,factor)
+            ind_to_ask_small = calc_smaller_ind(ind_to_ask,im_h,im_w,factor)
 
             # calculate the distance for each potential location
             nn=np.array([])
@@ -939,21 +870,23 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
                 r = ind_to_ask_small[nn_neg][farer_dist_neg[np.int32(r_candidates[np.argsort(r_candidates[:,0])][-number_to_show:][:,1])]]
 
             if len(a) > 0:
-                a = calc_larger_ind(a,np.int32(len_x/factor),np.int32(len_y/factor),factor)
-                a = change_to_closest_to_ask(a,ind_to_ask,len_x,len_y)
+                a = calc_larger_ind(a,np.int32(im_h/factor),np.int32(im_w/factor),factor)
+                a = change_to_closest_to_ask(a,ind_to_ask,im_h,im_w)
             if len(r) > 0:
-                r = calc_larger_ind(r,np.int32(len_x/factor),np.int32(len_y/factor),factor)
-                r = change_to_closest_to_ask(r,ind_to_ask,len_x,len_y)
+                r = calc_larger_ind(r,np.int32(im_h/factor),np.int32(im_w/factor),factor)
+                r = change_to_closest_to_ask(r,ind_to_ask,im_h,im_w)
             #'r' and 'a' are the locations to ask the user
 
             # evaluate the performance of the current model 
             final(row_gt,col_gt,dir,step,input,ind_to_ask,acc_ind_final,init_time,clicks_counter,patch_sz,im_size)
             # if all the potential locations have high score in the network's output map
+            
             """
-            min_ask=np.min(curr_all_scores[ind_to_ask])
-            print(f'=======> min at ind_to_ask={min_ask}')
-            if min_ask >= 0.85: #stop the algorithm
-                break
+            if len(ind_to_ask) > 0:
+                min_ask=np.min(curr_all_scores[ind_to_ask])
+                print(f'=======> min at ind_to_ask={min_ask}')
+                if min_ask >= 0.85: #stop the algorithm
+                    break
             """
 
             #boxes_id_rej_to_user = np.int32(np.setdiff1d(r, np.where((rej_ind_final + acc_ind_final) >= 1)))
@@ -983,7 +916,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             if (get_feedback):
                 get_feedback_from_gt(row_gt,col_gt)
                 out_image_file=f'feedback_query_boxes_markup_step{step}.png'
-                b_image=show_acc_rej_boxes_on_image(input[0],boxes_acc_to_user,boxes_rej_to_user,out_image_file,convert_gray=True)
+                b_image=show_acc_rej_boxes_on_image(input[0],boxes_acc_to_user,boxes_rej_to_user,dir+out_image_file,convert_gray=True)
 
             print(f'step*batch_size={step*batch_size}, corrected lables: # of user_acc:{len(user_acc)}, # of user_rej:{len(user_rej)}')
 
@@ -1000,7 +933,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             acc_ind_final[user_acc] = 1
 
             if get_feedback:
-                out_image_file=f'feedback_query_boxes_reviewed_gt_markup_step{step}.png'
+                out_image_file=dir+f'feedback_query_boxes_reviewed_gt_markup_step{step}.png'
                 show_acc_rej_on_image(b_image,all_center_ind,acc_ind_final,rej_ind_final,out_image_file,convert_gray=False)
 
             
@@ -1010,8 +943,8 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
 
             sess.run(assign_rej_ind_final, {rej_box_ind_final_ph: rej_ind_final})
             sess.run(assign_acc_ind_final, {acc_box_ind_final_ph: acc_ind_final})
-            sess.run(assign_rej_ind_smaller_final, {rej_box_ind_final_smaller_ph: calc_smaller_ind(np.where(rej_ind_final==1)[0],len_x,len_y,factor,True)})
-            sess.run(assign_acc_ind_smaller_final, {acc_box_ind_final_smaller_ph: calc_smaller_ind(np.where(acc_ind_final==1)[0],len_x,len_y,factor,True)})
+            sess.run(assign_rej_ind_smaller_final, {rej_box_ind_final_smaller_ph: calc_smaller_ind(np.where(rej_ind_final==1)[0],im_h,im_w,factor,True)})
+            sess.run(assign_acc_ind_smaller_final, {acc_box_ind_final_smaller_ph: calc_smaller_ind(np.where(acc_ind_final==1)[0],im_h,im_w,factor,True)})
 
             user_rej = []
             user_acc = []
@@ -1023,7 +956,7 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             print(f'Train the network using the updated labels')
             i=0
             while continue_training(rej_ind_final, acc_ind_final, curr_all_scores) and i<30:
-                print(f'updating models: iteration {i}')
+                #print(f'updating models: iteration {i}')
                 i += 1
                 sess.run(opt_G_rejacc_maps)
                 curr_all_scores = sess.run(all_scores)
@@ -1034,21 +967,26 @@ def main(dir,base_dir,im_size,image_name,number_of_patches,th,filename,gt_color,
             [curr_pos_ind, curr_ind_box] = sess.run([pos_ind, ind_box])
             curr_center_ind = all_center_ind[curr_ind_box]
             step += 1
-        list_of_tuples = list(zip(Iteration, Ground_Truth_Count, Predicted_Count, Accuracy, dens_sTILS, Time_Duration))
+        list_of_tuples = list(zip(Iteration, Ground_Truth_Count, Predicted_Count, Accuracy, precision, dens_sTILS, Time_Duration))
         list_of_tuples 
         df = pd.DataFrame(list_of_tuples,
-                  columns = ['Iteration', 'Ground_Truth_Count','Predicted_Count', 'Accuracy (%)', 'sTILS Density (%)','Time_Duration(sec)'])
+                  columns = ['Iteration', 'Ground_Truth_Count','Predicted_Count', 'Recall (%)', 'Precision (%)', 'sTILS Density (%)','Time_Duration(sec)'])
         df.to_csv(dir+image_name+'_FINAL_Data.csv',index=False)
+        """
         plt.plot(clicks_hist, Accuracy)
-        plt.title('Feedback Corrections vs Accuracy')
+        plt.title('Feedback Corrections vs Recall')
         plt.xlabel('# Corrections')
-        plt.ylabel('Accuracy (%)')
-        plt.savefig(dir+image_name+'_Corrections_vs_Acc.png')
+        plt.ylabel('Recall (%)')
+        plt.savefig(dir+image_name+'_Corrections_vs_Recall.png')
+        """
+        line_chartRecall = plt.plot(clicks_hist, Accuracy)
+        line_chartPrec = plt.plot(clicks_hist, precision)
+        plt.title('Feedback Corrections vs Recall & Precision')
+        plt.xlabel('# Corrections')
+        plt.ylabel('Recall & Precision(%)')
+        plt.legend(['Recall', 'Precision'], loc=4)
+        plt.savefig(dir+image_name+'_Corrections_vs_Recall_and_Precision.png')
 
-def normalize_image(x):
-    xmin = np.min(x.flatten())
-    xmax = np.max(x.flatten())
-    return (x - xmin)/(xmax-xmin)
     
 def final(row_gt,col_gt,dir,step,input,ind_to_ask,acc_ind_final,init_time,clicks_counter,patch_sz,im_size):
     """
@@ -1056,14 +994,16 @@ def final(row_gt,col_gt,dir,step,input,ind_to_ask,acc_ind_final,init_time,clicks
     (3) calculate the localization error (4) print total time, clicks, false positive/negative, counting, ground_truth
     (5) save these measurments in a .txt file
     """
-    print("----------------------eval---------------")
-    [count,final_res_image] = purple_dots_on_image(input,ind_to_ask,acc_ind_final)
+    print(f"================ eval step {step} ================")
+    [count,final_res_image] = purple_dots_on_image(input,all_center_ind,ind_to_ask,acc_ind_final,patch_sz_hf)
+
     #image.imsave(dir+'final_res.png', scipy.misc.imresize(final_res_image,2.0))
     h,w=final_res_image.shape[0:2]
-    resized = cv2.resize(final_res_image,(2*w,2*h))
-    print(f'saving image to {dir}final_res'+str(step)+'.png')
+    #resized = cv2.resize(final_res_image,(2*w,2*h))
+    print(f'saving fina result image to {dir}final_res{step}+.png, size wxh:{w}x{h},\
+        from input size hxw:{input.shape[1]}x{input.shape[2]}')
     Iteration.append(step)
-    image.imsave(dir+'final_res_%d.png'%(step), normalize_image(resized))
+    image.imsave(dir+'final_res_%d.png'%(step), normalize_image(final_res_image))
 
     np.savetxt(dir + 'res_ours_' + str(step) + '.txt', np.concatenate((np.setdiff1d(ind_to_ask, np.where(acc_ind_final == 1)), np.where(acc_ind_final == 1)[0])))
     print("COUNT: ",count)
@@ -1072,7 +1012,7 @@ def final(row_gt,col_gt,dir,step,input,ind_to_ask,acc_ind_final,init_time,clicks
     Time_Duration.append(stop_time)
     print("Number of clicks: ", clicks_counter)
     clicks_hist.append(clicks_counter)
-    print("----------------------FP and FN---------------")
+    print(f"----------------------FP and FN step {step} ---------------")
     [FP,FN,gt,count_ours] = count_images(row_gt,col_gt,dir,step,patch_sz,im_size)
 
     print("gt_count: ", gt[0])
@@ -1080,8 +1020,9 @@ def final(row_gt,col_gt,dir,step,input,ind_to_ask,acc_ind_final,init_time,clicks
     Predicted_Count.append(count_ours[0])
     dens_sTILS.append(find_density(count_ours[0]))
     Ground_Truth_Count.append(gt[0])
-    #true_p = (gt[0] - FP[0])
-    Accuracy.append(find_acc(gt[0], count_ours[0]))
+    true_p = (gt[0] - FN[0])
+    Accuracy.append(find_acc(gt[0], true_p))
+    precision.append(find_prec(FP[0], true_p))
     print("FN: ", FN[0])
     print("FP: ", FP[0])
 
@@ -1113,7 +1054,7 @@ if __name__ == "__main__":
     print("participant_name:",participant_name)
     
     #[im_size,window_loc,number_of_patches,th,path,show_gray,max_num_cells,gt_color,curr_patch_sz] = get_image_info(image_name)
-    [im_size,number_of_patches,th,path,show_gray,max_num_cells,gt_color,curr_patch_sz] = get_image_info(image_name)
+    [im_size,number_of_patches,th,path,show_gray,max_num_cells,gt_color,curr_patch_sz,_] = get_image_info(image_name)
     patch_sz = curr_patch_sz
     #patch_sz_hf = np.int32(np.floor(curr_patch_sz / 2))
     patch_sz_hf = curr_patch_sz//2
